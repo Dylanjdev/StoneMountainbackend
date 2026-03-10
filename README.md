@@ -40,6 +40,7 @@ This service receives inbound SMS from SignalWire and replies using TwiML/LaML.
 - `ADMIN_API_KEY` required for admin campaign endpoints
 - `SUBSCRIBERS_FILE` JSON file used to store opted-in numbers
 - `CAMPAIGN_DRY_RUN` set `true` to test campaign sends without sending actual SMS
+- `CAMPAIGN_API_BASE_URL` base URL used by `npm run send-drop` CLI helper
 
 ## SignalWire setup
 
@@ -95,5 +96,21 @@ curl -X POST https://<your-render-service>.onrender.com/admin/send-drop \
    -H "x-admin-key: <ADMIN_API_KEY>" \
    -H "Content-Type: application/json" \
    -d '{"message":"✨ VIP early drop tonight at 6 PM! Reply STOP to opt out.","recipients":["+12765551212","+12765559876"]}'
+```
+
+### CLI helper for staff
+
+From this folder, run:
+
+```bash
+npm run send-drop
+```
+
+It will prompt for message text and send to all active subscribers using `CAMPAIGN_API_BASE_URL` and `ADMIN_API_KEY`.
+
+You can also pass the message directly:
+
+```bash
+npm run send-drop -- "🍦 New drop today at 4 PM! Reply STOP to opt out."
 ```
 # StoneMountainbackend
