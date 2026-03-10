@@ -12,5 +12,12 @@
     "createdAt": "2026-03-10T20:00:00.000Z",
     "updatedAt": "2026-03-10T20:00:00.000Z",
     "lastSource": "manual-add"
+  },
+  {
+    "phone": "+19718065681",
+    "optedIn": true,
+    "createdAt": "2026-03-10T20:20:00.000Z",
+    "updatedAt": "2026-03-10T20:20:00.000Z",
+    "lastSource": "manual-add"
   }
 ]
