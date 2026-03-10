@@ -70,6 +70,24 @@ async function main() {
   console.log(`Attempted: ${payload.attempted}`)
   console.log(`Sent: ${payload.sent}`)
   console.log(`Failed: ${payload.failed}`)
+
+  const results = Array.isArray(payload.results) ? payload.results : []
+  const failedResults = results.filter((item) => !item.ok)
+  const sentResults = results.filter((item) => item.ok)
+
+  if (failedResults.length > 0) {
+    console.log('\nFailed recipients:')
+    for (const item of failedResults) {
+      console.log(`- ${item.to}: ${item.error || 'Unknown error'}`)
+    }
+  }
+
+  if (sentResults.length > 0) {
+    console.log('\nSuccessful recipients:')
+    for (const item of sentResults) {
+      console.log(`- ${item.to}${item.sid ? ` (sid: ${item.sid})` : ''}`)
+    }
+  }
 }
 
 main().catch((error) => {

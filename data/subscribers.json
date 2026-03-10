@@ -1,12 +1,5 @@
 [
   {
-    "phone": "+12765551212",
-    "optedIn": true,
-    "createdAt": "2026-03-10T19:07:41.917Z",
-    "updatedAt": "2026-03-10T19:07:41.917Z",
-    "lastSource": "inbound-sms"
-  },
-  {
     "phone": "+14239231909",
     "optedIn": true,
     "createdAt": "2026-03-10T20:00:00.000Z",
