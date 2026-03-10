@@ -36,6 +36,10 @@ This service receives inbound SMS from SignalWire and replies using TwiML/LaML.
 - `WEBHOOK_RATE_LIMIT_WINDOW_MS` default `60000`
 - `WEBHOOK_RATE_LIMIT_MAX` default `60`
 - `REQUIRE_SIGNALWIRE_SIGNATURE` default `false`; set `true` in production after webhook URL is stable
+- `SIGNALWIRE_FROM_NUMBER` the purchased SignalWire number used for outbound campaigns
+- `ADMIN_API_KEY` required for admin campaign endpoints
+- `SUBSCRIBERS_FILE` JSON file used to store opted-in numbers
+- `CAMPAIGN_DRY_RUN` set `true` to test campaign sends without sending actual SMS
 
 ## SignalWire setup
 
@@ -67,4 +71,29 @@ If `WEBHOOK_SECRET` is set, requests without `x-webhook-secret` will return `401
 If your provider cannot send custom headers, include the secret in the webhook URL query string:
 
 `https://<your-render-service>.onrender.com/webhooks/sms?secret=<WEBHOOK_SECRET>`
+
+## Outbound campaigns (new drops)
+
+Subscribers are saved automatically when users text the join keyword (or `START`), and removed from active sends when they text `STOP`.
+
+- `GET /admin/subscribers` returns active subscriber list
+- `POST /admin/send-drop` sends one message to all active subscribers, or to a provided recipient list
+
+### Send a new drop to all active subscribers
+
+```bash
+curl -X POST https://<your-render-service>.onrender.com/admin/send-drop \
+   -H "x-admin-key: <ADMIN_API_KEY>" \
+   -H "Content-Type: application/json" \
+   -d '{"message":"🍓 New drop! Strawberry Cheesecake swirl lands at 2 PM. Reply STOP to opt out."}'
+```
+
+### Send a drop to specific numbers only
+
+```bash
+curl -X POST https://<your-render-service>.onrender.com/admin/send-drop \
+   -H "x-admin-key: <ADMIN_API_KEY>" \
+   -H "Content-Type: application/json" \
+   -d '{"message":"✨ VIP early drop tonight at 6 PM! Reply STOP to opt out.","recipients":["+12765551212","+12765559876"]}'
+```
 # StoneMountainbackend
