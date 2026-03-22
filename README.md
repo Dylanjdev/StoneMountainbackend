@@ -1,12 +1,17 @@
-# StoneBackend (Render + SignalWire)
+# StoneBackend (Render + Twilio)
 
-This service receives inbound SMS from SignalWire and replies using TwiML/LaML.
+This service receives inbound SMS from Twilio and replies using TwiML.
+
+Subscriber storage supports two modes:
+
+- Local JSON file (default, good for local dev)
+- Supabase Postgres (recommended for production)
 
 ## Endpoints
 
 - `GET /` basic service status
 - `GET /health` Render health check endpoint
-- `POST /webhooks/sms` SignalWire inbound SMS webhook
+- `POST /webhooks/sms` Twilio inbound SMS webhook
 
 ## Local setup
 
@@ -29,26 +34,53 @@ This service receives inbound SMS from SignalWire and replies using TwiML/LaML.
 - `ALLOWED_ORIGIN` optional CORS allow origin
 - `TEXT_CLUB_KEYWORD` default `YOGURT`
 - `BUSINESS_NAME` default `Stone Mountain Yogurt`
-- `SIGNALWIRE_PROJECT_ID` SignalWire project id
-- `SIGNALWIRE_SPACE_URL` SignalWire space URL
-- `SIGNALWIRE_TOKEN` token used for optional signature verification
+- `TWILIO_ACCOUNT_SID` Twilio account SID (starts with `AC`)
+- `TWILIO_AUTH_TOKEN` Twilio auth token (used for optional signature verification and outbound sends)
+- `TWILIO_FROM_NUMBER` the purchased Twilio number used for outbound campaigns
 - `WEBHOOK_SECRET` optional shared secret header value (`x-webhook-secret`)
 - `WEBHOOK_RATE_LIMIT_WINDOW_MS` default `60000`
 - `WEBHOOK_RATE_LIMIT_MAX` default `60`
-- `REQUIRE_SIGNALWIRE_SIGNATURE` default `false`; set `true` in production after webhook URL is stable
-- `SIGNALWIRE_FROM_NUMBER` the purchased SignalWire number used for outbound campaigns
+- `REQUIRE_TWILIO_SIGNATURE` default `false`; set `true` in production after webhook URL is stable
 - `ADMIN_API_KEY` required for admin campaign endpoints
-- `SUBSCRIBERS_FILE` JSON file used to store opted-in numbers
+- `SUBSCRIBERS_FILE` JSON file used to store opted-in numbers (when Supabase is not configured)
 - `CAMPAIGN_DRY_RUN` set `true` to test campaign sends without sending actual SMS
 - `CAMPAIGN_API_BASE_URL` base URL used by `npm run send-drop` CLI helper
+- `SUPABASE_URL` optional; enable Supabase storage when paired with service role key
+- `SUPABASE_SERVICE_ROLE_KEY` optional; required with `SUPABASE_URL`
+- `SUPABASE_SUBSCRIBERS_TABLE` optional; defaults to `text_club_subscribers`
 
-## SignalWire setup
+## Supabase setup (recommended)
 
-After deploy, set the number's inbound SMS webhook URL to:
+1. Create a new Supabase project.
+2. Open SQL Editor and run:
+
+```sql
+create table if not exists public.text_club_subscribers (
+   phone text primary key,
+   opted_in boolean not null default true,
+   created_at timestamptz not null default timezone('utc', now()),
+   updated_at timestamptz not null default timezone('utc', now()),
+   last_source text not null default 'inbound-sms'
+);
+
+create index if not exists idx_text_club_subscribers_opted_in
+   on public.text_club_subscribers (opted_in);
+```
+
+3. In Supabase Project Settings, copy:
+- Project URL -> `SUPABASE_URL`
+- Service role key -> `SUPABASE_SERVICE_ROLE_KEY`
+4. Set those env vars in Render (or your host).
+
+When both `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are present, this backend automatically uses Supabase for subscriber reads/writes.
+
+## Twilio setup
+
+After deploy, go to your Twilio number's configuration and set the inbound SMS webhook URL to:
 
 `https://<your-render-service>.onrender.com/webhooks/sms`
 
-Method: `POST`
+Method: `HTTP POST`
 
 ## Render setup
 

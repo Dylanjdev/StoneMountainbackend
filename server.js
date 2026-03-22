@@ -3,6 +3,7 @@ const crypto = require('crypto')
 const fs = require('fs/promises')
 const path = require('path')
 const dotenv = require('dotenv')
+const { createClient } = require('@supabase/supabase-js')
 
 dotenv.config()
 
@@ -11,14 +12,30 @@ const port = process.env.PORT || 10000
 app.set('trust proxy', true)
 
 const webhookSecret = process.env.WEBHOOK_SECRET
-const signatureRequired = String(process.env.REQUIRE_SIGNALWIRE_SIGNATURE || 'false').toLowerCase() === 'true'
+const signatureRequired = String(process.env.REQUIRE_TWILIO_SIGNATURE || 'false').toLowerCase() === 'true'
 const rateLimitWindowMs = Number(process.env.WEBHOOK_RATE_LIMIT_WINDOW_MS || 60000)
 const rateLimitMax = Number(process.env.WEBHOOK_RATE_LIMIT_MAX || 60)
 const ipRequestBuckets = new Map()
 const subscribersFile = process.env.SUBSCRIBERS_FILE || path.join(__dirname, 'data', 'subscribers.json')
+const supabaseUrl = String(process.env.SUPABASE_URL || '').trim()
+const supabaseServiceRoleKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
+const subscribersTable = String(process.env.SUPABASE_SUBSCRIBERS_TABLE || 'text_club_subscribers').trim()
+const hasSupabaseConfig = Boolean(supabaseUrl && supabaseServiceRoleKey)
+const supabase = hasSupabaseConfig
+  ? createClient(supabaseUrl, supabaseServiceRoleKey, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false
+      }
+    })
+  : null
 const adminApiKey = process.env.ADMIN_API_KEY || ''
-const signalWireFromNumber = process.env.SIGNALWIRE_FROM_NUMBER || process.env.TEXT_CLUB_NUMBER || '+12762684720'
+const twilioFromNumber = process.env.TWILIO_FROM_NUMBER || process.env.TEXT_CLUB_NUMBER || '+12762684720'
 const campaignDryRun = String(process.env.CAMPAIGN_DRY_RUN || 'false').toLowerCase() === 'true'
+
+if ((supabaseUrl && !supabaseServiceRoleKey) || (!supabaseUrl && supabaseServiceRoleKey)) {
+  console.warn('[storage] Incomplete Supabase config detected. Falling back to local subscribers file storage.')
+}
 
 app.use(express.json())
 app.use(express.urlencoded({ extended: false }))
@@ -51,7 +68,7 @@ app.get('/health', (req, res) => {
   res.json({ ok: true })
 })
 
-app.post('/webhooks/sms', enforceWebhookRateLimit, enforceWebhookSecret, enforceSignalWireSignature, (req, res) => {
+app.post('/webhooks/sms', enforceWebhookRateLimit, enforceWebhookSecret, enforceTwilioSignature, (req, res) => {
   const incomingBody = String(req.body.Body || '').trim()
   const from = String(req.body.From || 'unknown')
   const normalized = incomingBody.toUpperCase()
@@ -83,7 +100,7 @@ app.post('/webhooks/sms', enforceWebhookRateLimit, enforceWebhookSecret, enforce
     reply = `Hey there 👋 Reply ${keyword} to join the ${businessName} Text Club for deals, new menu drops, and early updates ✨ Msg freq varies. Reply STOP to opt out, HELP for help.`
   }
 
-  // SignalWire accepts TwiML/LaML response for inbound SMS webhooks.
+  // Twilio expects a TwiML response for inbound SMS webhooks.
   const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${escapeXml(reply)}</Message></Response>`
 
   res.type('text/xml').send(twiml)
@@ -128,7 +145,7 @@ app.post('/admin/send-drop', enforceAdminAuth, async (req, res) => {
   const results = []
   for (const to of targetNumbers) {
     try {
-      const sendResult = await sendSignalWireSms({ to, body: message })
+      const sendResult = await sendTwilioSms({ to, body: message })
       results.push({ to, ok: true, sid: sendResult.sid || null })
     } catch (error) {
       results.push({ to, ok: false, error: error.message })
@@ -204,21 +221,21 @@ function enforceAdminAuth(req, res, next) {
   return res.status(401).json({ error: 'Invalid admin credentials.' })
 }
 
-function enforceSignalWireSignature(req, res, next) {
+function enforceTwilioSignature(req, res, next) {
   if (!signatureRequired) return next()
 
-  const token = process.env.SIGNALWIRE_TOKEN
-  if (!token) {
-    return res.status(500).json({ error: 'SIGNALWIRE_TOKEN is required when signature verification is enabled.' })
+  const authToken = process.env.TWILIO_AUTH_TOKEN
+  if (!authToken) {
+    return res.status(500).json({ error: 'TWILIO_AUTH_TOKEN is required when signature verification is enabled.' })
   }
 
-  const signature = req.get('x-twilio-signature') || req.get('x-signalwire-signature') || ''
+  const signature = req.get('x-twilio-signature') || ''
   if (!signature) {
     console.warn('[sms] rejected webhook due to missing signature')
     return res.status(401).json({ error: 'Missing webhook signature.' })
   }
 
-  const expected = computeTwilioCompatibleSignature(req, token)
+  const expected = computeTwilioCompatibleSignature(req, authToken)
   if (!safeEquals(signature, expected)) {
     console.warn('[sms] rejected webhook due to invalid signature')
     return res.status(401).json({ error: 'Invalid webhook signature.' })
@@ -250,23 +267,22 @@ function safeEquals(a, b) {
   return crypto.timingSafeEqual(aBuffer, bBuffer)
 }
 
-async function sendSignalWireSms({ to, body }) {
+async function sendTwilioSms({ to, body }) {
   if (campaignDryRun) {
     return { sid: `dry-run-${Date.now()}` }
   }
 
-  const projectId = process.env.SIGNALWIRE_PROJECT_ID
-  const token = process.env.SIGNALWIRE_TOKEN
-  const spaceUrl = process.env.SIGNALWIRE_SPACE_URL
+  const accountSid = process.env.TWILIO_ACCOUNT_SID
+  const authToken = process.env.TWILIO_AUTH_TOKEN
 
-  if (!projectId || !token || !spaceUrl) {
-    throw new Error('SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN, and SIGNALWIRE_SPACE_URL are required.')
+  if (!accountSid || !authToken) {
+    throw new Error('TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN are required.')
   }
 
-  const endpoint = `https://${spaceUrl}/api/laml/2010-04-01/Accounts/${projectId}/Messages.json`
-  const auth = Buffer.from(`${projectId}:${token}`).toString('base64')
+  const endpoint = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`
+  const auth = Buffer.from(`${accountSid}:${authToken}`).toString('base64')
   const payload = new URLSearchParams({
-    From: signalWireFromNumber,
+    From: twilioFromNumber,
     To: to,
     Body: body
   })
@@ -282,7 +298,7 @@ async function sendSignalWireSms({ to, body }) {
 
   const text = await response.text()
   if (!response.ok) {
-    throw new Error(`SignalWire send failed (${response.status}): ${text.slice(0, 200)}`)
+    throw new Error(`Twilio send failed (${response.status}): ${text.slice(0, 200)}`)
   }
 
   let parsed = {}
@@ -296,6 +312,10 @@ async function sendSignalWireSms({ to, body }) {
 }
 
 async function readSubscribers() {
+  if (supabase) {
+    return readSubscribersFromSupabase()
+  }
+
   try {
     const raw = await fs.readFile(subscribersFile, 'utf8')
     const parsed = JSON.parse(raw)
@@ -312,6 +332,10 @@ async function writeSubscribers(entries) {
 }
 
 async function updateSubscriberStatus(rawPhone, optedIn) {
+  if (supabase) {
+    return updateSubscriberStatusInSupabase(rawPhone, optedIn)
+  }
+
   const phone = normalizePhone(rawPhone)
   if (!phone) return
 
@@ -334,6 +358,46 @@ async function updateSubscriberStatus(rawPhone, optedIn) {
   }
 
   await writeSubscribers(subscribers)
+}
+
+async function readSubscribersFromSupabase() {
+  const { data, error } = await supabase
+    .from(subscribersTable)
+    .select('phone, opted_in, created_at, updated_at, last_source')
+
+  if (error) {
+    throw new Error(`Supabase read failed: ${error.message}`)
+  }
+
+  const rows = Array.isArray(data) ? data : []
+  return rows.map((row) => ({
+    phone: row.phone,
+    optedIn: Boolean(row.opted_in),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastSource: row.last_source || 'inbound-sms'
+  }))
+}
+
+async function updateSubscriberStatusInSupabase(rawPhone, optedIn) {
+  const phone = normalizePhone(rawPhone)
+  if (!phone) return
+
+  const now = new Date().toISOString()
+  const payload = {
+    phone,
+    opted_in: optedIn,
+    updated_at: now,
+    last_source: 'inbound-sms'
+  }
+
+  const { error } = await supabase
+    .from(subscribersTable)
+    .upsert(payload, { onConflict: 'phone' })
+
+  if (error) {
+    throw new Error(`Supabase upsert failed: ${error.message}`)
+  }
 }
 
 function normalizePhone(value) {
