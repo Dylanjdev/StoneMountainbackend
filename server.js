@@ -17,6 +17,7 @@ const rateLimitWindowMs = Number(process.env.WEBHOOK_RATE_LIMIT_WINDOW_MS || 600
 const rateLimitMax = Number(process.env.WEBHOOK_RATE_LIMIT_MAX || 60)
 const ipRequestBuckets = new Map()
 const subscribersFile = process.env.SUBSCRIBERS_FILE || path.join(__dirname, 'data', 'subscribers.json')
+const deliveryStatusFile = process.env.DELIVERY_STATUS_FILE || path.join(__dirname, 'data', 'delivery-status.json')
 const supabaseUrl = String(process.env.SUPABASE_URL || '').trim()
 const supabaseServiceRoleKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
 const subscribersTable = String(process.env.SUPABASE_SUBSCRIBERS_TABLE || 'text_club_subscribers').trim()
@@ -31,6 +32,7 @@ const supabase = hasSupabaseConfig
   : null
 const adminApiKey = process.env.ADMIN_API_KEY || ''
 const twilioFromNumber = process.env.TWILIO_FROM_NUMBER || process.env.TEXT_CLUB_NUMBER || '+12762684720'
+const configuredStatusCallbackUrl = String(process.env.TWILIO_STATUS_CALLBACK_URL || '').trim()
 const campaignDryRun = String(process.env.CAMPAIGN_DRY_RUN || 'false').toLowerCase() === 'true'
 
 if ((supabaseUrl && !supabaseServiceRoleKey) || (!supabaseUrl && supabaseServiceRoleKey)) {
@@ -106,6 +108,39 @@ app.post('/webhooks/sms', enforceWebhookRateLimit, enforceWebhookSecret, enforce
   res.type('text/xml').send(twiml)
 })
 
+app.post('/webhooks/twilio-status', enforceWebhookRateLimit, enforceWebhookSecret, enforceTwilioSignature, async (req, res) => {
+  const sid = String(req.body.MessageSid || req.body.SmsSid || '').trim()
+  const status = String(req.body.MessageStatus || req.body.SmsStatus || '').trim()
+  const to = String(req.body.To || '').trim()
+  const from = String(req.body.From || '').trim()
+  const errorCode = String(req.body.ErrorCode || '').trim()
+  const errorMessage = String(req.body.ErrorMessage || '').trim()
+
+  if (!sid || !status) {
+    return res.status(400).json({ error: 'MessageSid and MessageStatus are required.' })
+  }
+
+  const event = {
+    sid,
+    to,
+    from,
+    status,
+    errorCode: errorCode || null,
+    errorMessage: errorMessage || null,
+    receivedAt: new Date().toISOString()
+  }
+
+  try {
+    await upsertDeliveryStatus(event)
+  } catch (error) {
+    console.error('[delivery] failed to persist status callback', error)
+    return res.status(500).json({ error: 'Failed to persist delivery status.' })
+  }
+
+  console.log(`[delivery] sid=${sid} status=${status}${to ? ` to=${to}` : ''}`)
+  return res.sendStatus(204)
+})
+
 app.get('/admin/subscribers', enforceAdminAuth, async (req, res) => {
   const subscribers = await readSubscribers()
   const activeSubscribers = subscribers.filter((entry) => entry.optedIn)
@@ -143,9 +178,11 @@ app.post('/admin/send-drop', enforceAdminAuth, async (req, res) => {
   }
 
   const results = []
+  const statusCallbackUrl = resolveStatusCallbackUrl(req)
+
   for (const to of targetNumbers) {
     try {
-      const sendResult = await sendTwilioSms({ to, body: message })
+      const sendResult = await sendTwilioSms({ to, body: message, statusCallbackUrl })
       results.push({ to, ok: true, sid: sendResult.sid || null })
     } catch (error) {
       results.push({ to, ok: false, error: error.message })
@@ -160,10 +197,44 @@ app.post('/admin/send-drop', enforceAdminAuth, async (req, res) => {
   return res.json({
     ok: failed === 0,
     dryRun: campaignDryRun,
+    statusCallbackUrl,
     attempted: results.length,
     sent,
     failed,
     results
+  })
+})
+
+app.get('/admin/delivery-status', enforceAdminAuth, async (req, res) => {
+  const sid = String(req.query.sid || '').trim()
+  const to = normalizePhone(String(req.query.to || '').trim())
+  const statusFilter = String(req.query.status || '').trim().toLowerCase()
+  const limitRaw = Number(req.query.limit || 50)
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, Math.trunc(limitRaw))) : 50
+
+  const statuses = await readDeliveryStatuses()
+  let filtered = statuses
+
+  if (sid) {
+    filtered = filtered.filter((item) => item.sid === sid)
+  }
+
+  if (to) {
+    filtered = filtered.filter((item) => item.to === to)
+  }
+
+  if (statusFilter) {
+    filtered = filtered.filter((item) => String(item.status || '').toLowerCase() === statusFilter)
+  }
+
+  filtered = filtered
+    .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+    .slice(0, limit)
+
+  return res.json({
+    ok: true,
+    count: filtered.length,
+    statuses: filtered
   })
 })
 
@@ -267,7 +338,27 @@ function safeEquals(a, b) {
   return crypto.timingSafeEqual(aBuffer, bBuffer)
 }
 
-async function sendTwilioSms({ to, body }) {
+function resolveStatusCallbackUrl(req) {
+  if (configuredStatusCallbackUrl) {
+    return configuredStatusCallbackUrl
+  }
+
+  const baseUrl = getRequestBaseUrl(req)
+  if (!baseUrl) {
+    return ''
+  }
+
+  return `${baseUrl}/webhooks/twilio-status`
+}
+
+function getRequestBaseUrl(req) {
+  const proto = req.get('x-forwarded-proto') || req.protocol
+  const host = req.get('x-forwarded-host') || req.get('host')
+  if (!proto || !host) return ''
+  return `${proto}://${host}`
+}
+
+async function sendTwilioSms({ to, body, statusCallbackUrl }) {
   if (campaignDryRun) {
     return { sid: `dry-run-${Date.now()}` }
   }
@@ -286,6 +377,11 @@ async function sendTwilioSms({ to, body }) {
     To: to,
     Body: body
   })
+
+  if (statusCallbackUrl) {
+    payload.append('StatusCallback', statusCallbackUrl)
+    payload.append('StatusCallbackMethod', 'POST')
+  }
 
   const response = await fetch(endpoint, {
     method: 'POST',
@@ -309,6 +405,62 @@ async function sendTwilioSms({ to, body }) {
   }
 
   return { sid: parsed.sid || null }
+}
+
+async function readDeliveryStatuses() {
+  try {
+    const raw = await fs.readFile(deliveryStatusFile, 'utf8')
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch (error) {
+    if (error.code === 'ENOENT') return []
+    throw error
+  }
+}
+
+async function writeDeliveryStatuses(entries) {
+  await fs.mkdir(path.dirname(deliveryStatusFile), { recursive: true })
+  await fs.writeFile(deliveryStatusFile, JSON.stringify(entries, null, 2), 'utf8')
+}
+
+async function upsertDeliveryStatus(event) {
+  const statuses = await readDeliveryStatuses()
+  const now = event.receivedAt || new Date().toISOString()
+  const existing = statuses.find((entry) => entry.sid === event.sid)
+  const historyEntry = {
+    status: event.status,
+    at: now,
+    errorCode: event.errorCode || null,
+    errorMessage: event.errorMessage || null
+  }
+
+  if (existing) {
+    existing.to = event.to || existing.to || ''
+    existing.from = event.from || existing.from || ''
+    existing.status = event.status
+    existing.errorCode = event.errorCode || null
+    existing.errorMessage = event.errorMessage || null
+    existing.updatedAt = now
+    existing.history = Array.isArray(existing.history) ? existing.history : []
+    existing.history.push(historyEntry)
+    if (existing.history.length > 25) {
+      existing.history = existing.history.slice(-25)
+    }
+  } else {
+    statuses.push({
+      sid: event.sid,
+      to: event.to || '',
+      from: event.from || '',
+      status: event.status,
+      errorCode: event.errorCode || null,
+      errorMessage: event.errorMessage || null,
+      createdAt: now,
+      updatedAt: now,
+      history: [historyEntry]
+    })
+  }
+
+  await writeDeliveryStatuses(statuses)
 }
 
 async function readSubscribers() {

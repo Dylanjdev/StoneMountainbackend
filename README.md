@@ -12,6 +12,7 @@ Subscriber storage supports two modes:
 - `GET /` basic service status
 - `GET /health` Render health check endpoint
 - `POST /webhooks/sms` Twilio inbound SMS webhook
+- `POST /webhooks/twilio-status` Twilio outbound delivery status webhook
 
 ## Local setup
 
@@ -37,12 +38,14 @@ Subscriber storage supports two modes:
 - `TWILIO_ACCOUNT_SID` Twilio account SID (starts with `AC`)
 - `TWILIO_AUTH_TOKEN` Twilio auth token (used for optional signature verification and outbound sends)
 - `TWILIO_FROM_NUMBER` the purchased Twilio number used for outbound campaigns
+- `TWILIO_STATUS_CALLBACK_URL` optional full URL Twilio should call for outbound status events; if omitted, backend auto-builds `https://<current-host>/webhooks/twilio-status`
 - `WEBHOOK_SECRET` optional shared secret header value (`x-webhook-secret`)
 - `WEBHOOK_RATE_LIMIT_WINDOW_MS` default `60000`
 - `WEBHOOK_RATE_LIMIT_MAX` default `60`
 - `REQUIRE_TWILIO_SIGNATURE` default `false`; set `true` in production after webhook URL is stable
 - `ADMIN_API_KEY` required for admin campaign endpoints
 - `SUBSCRIBERS_FILE` JSON file used to store opted-in numbers (when Supabase is not configured)
+- `DELIVERY_STATUS_FILE` JSON file used to store outbound delivery states/events
 - `CAMPAIGN_DRY_RUN` set `true` to test campaign sends without sending actual SMS
 - `CAMPAIGN_API_BASE_URL` base URL used by `npm run send-drop` CLI helper
 - `SUPABASE_URL` optional; enable Supabase storage when paired with service role key
@@ -111,6 +114,7 @@ Subscribers are saved automatically when users text the join keyword (or `START`
 
 - `GET /admin/subscribers` returns active subscriber list
 - `POST /admin/send-drop` sends one message to all active subscribers, or to a provided recipient list
+- `GET /admin/delivery-status` returns stored delivery states for sent messages
 
 ### Send a new drop to all active subscribers
 
@@ -144,5 +148,21 @@ You can also pass the message directly:
 
 ```bash
 npm run send-drop -- "🍦 New drop today at 4 PM! Reply STOP to opt out."
+```
+
+### Check delivery statuses
+
+After a campaign send returns message SIDs, Twilio posts state changes (queued/sent/delivered/failed) to `/webhooks/twilio-status`. Query recent statuses with:
+
+```bash
+curl -X GET "https://<your-render-service>.onrender.com/admin/delivery-status?limit=50" \
+   -H "x-admin-key: <ADMIN_API_KEY>"
+```
+
+Filter by SID:
+
+```bash
+curl -X GET "https://<your-render-service>.onrender.com/admin/delivery-status?sid=SMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+   -H "x-admin-key: <ADMIN_API_KEY>"
 ```
 # StoneMountainbackend
